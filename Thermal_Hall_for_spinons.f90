@@ -1,0 +1,601 @@
+!################ CONST ################### 
+MODULE CONST
+        IMPLICIT NONE 
+        COMPLEX, PARAMETER :: I = (0.0, 1.0)
+        REAL, PARAMETER :: PI = 4*ATAN(1.0)
+        INTEGER, PARAMETER :: IKIND=4, RKIND=8
+END MODULE CONST
+
+!################ MODEL ##################
+! MODELE PARAMETERS:
+! LX, LY : THE SIZE OF THE SYSTEM 
+! OPNUM : THE NUMBER OF PARAMETERS 
+! J1     : THE HEISENBERG J1
+! S     : THE SPIN 
+! DM    : THE DZYALOSHINSKII-MORIYA INTERACTION  
+! OPNUM : THE NUMBER OF ORDER PARAMETERS
+! H_STAGG: THE STAGGERED MAGNETIC FIELD
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+MODULE MODEL 
+        USE CONST
+        IMPLICIT NONE 
+        INTEGER(KIND=IKIND) :: LX = 100 
+        INTEGER(KIND=IKIND) :: LY = 100
+        REAL(KIND=RKIND) :: J =1.0D0 
+        REAL(KIND=RKIND) :: K =0.2D0
+        REAL(KIND=RKIND) :: S=0.5D0
+        REAL(KIND=RKIND) :: DM=0.0*1.0D0
+        REAL(KIND=RKIND) :: H_STAGG=0.0*0.001D0
+        INTEGER(KIND=IKIND),PARAMETER :: OPNUM=10
+        INTEGER::Z0=3,Z1=6,ALPHA=1,BETA=-1
+        REAL(KIND=RKIND)::ERRO=1.0D-6
+        REAL,PARAMETER::LAMBDA=0.5
+END MODULE MODEL 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!################ PHYSICS  ##################
+
+MODULE SOLVE_CONSIST_EQUATIONS
+
+!!!OP IS ORDER PARAMETER!!!!!!!!!!!!!!
+!! OP(1): CHEMICAL POTENTIAL 
+!! OP(2): \CHI_{0}--> ANTIFERROMAGNETIC ANSATZA
+!!OP(3): CSP----> THE SYMMETRY PART FOR SPIN + OF ANASTZ AT SITE A
+!!OP(4): CSM----> THE SYMMETRY PART FOR SPIN - OF ANASTZ AT SITE A
+!!OP(5): CAP----> THE ANTISYMMETRY PART FOR SPIN + OF ANASTZ AT SITE A
+!!OP(6): CAM----> THE ANTISYMMETRY PART FOR SPIN - OF ANASTZ AT SITE A
+!!OP(7): DSP---->THE SYMMETRY PART FOR SPIN + (PLUS) OF ANASTZ AT SITE B
+!! OP(8): DSM---->THE SYMMETRY PART FOR SPIN - (MINUSS) OF ANASTZ AT SITE B
+!! OP(9): DAP---->THE ANTISYMMETRY PART FOR SPIN + (PLUS ) OF ANASTZ AT SITE B
+!! OP(10): DAM---->THE ANTISYMMETRY PART FOR SPIN - (MINUS) OF ANASTZ AT SITE B
+CONTAINS 
+
+    
+!-------TRANSFORMED PARAMETERS --------------!
+!! TOP(1): CHEMICAL POTENTIAL---->OP(1)
+!! TOP(2): \CHI_{0} ---->OP(2)
+!! TOP(3): MSP---->CSP-DSM--->OP(3)-OP(8)
+!! TOP(4): MSM----->CSM-DSP---->OP(4)-OP(7)
+!! TOP(5): MAP---->CAP-DAM----->OP(5)-OP(10)
+!! TOP(6): MAM---->CAM-DAP----->OP(6)-OP(9)
+!! TOP(7): PSP---->CSP+DSM----->OP(3)+OP(8)
+!! TOP(8): PSM---->CSM+DSP------>OP(4)+OP(7)
+!! TOP(9): PAP----->CAP+DAM----->OP(5)+OP(10)
+!! TOP(10):PAM----->CAM+DAP----->OP(6)+OP(9)
+SUBROUTINE TRANSFORM_PARA(OP,TOP)
+        USE CONST
+        USE MODEL
+        IMPLICIT NONE 
+        REAL(KIND=RKIND),INTENT(IN):: OP(OPNUM)
+        REAL(KIND=RKIND),INTENT(OUT)::TOP(OPNUM)
+        TOP(1)=OP(1)
+        TOP(2)=OP(2)
+        TOP(3)=OP(3)-OP(8)
+        TOP(4)=OP(4)-OP(7)
+        TOP(5)=OP(5)-OP(10)
+        TOP(6)=OP(6)-OP(9)
+        TOP(7)=OP(3)+OP(8)
+        TOP(8)=OP(4)+OP(7)
+        TOP(9)=OP(5)+OP(10)
+        TOP(10)=OP(6)+OP(9)
+
+END SUBROUTINE TRANSFORM_PARA
+
+SUBROUTINE ANTITRANS_PARA(TOP,OP)
+        USE CONST
+        USE MODEL
+        IMPLICIT NONE 
+        REAL(KIND=RKIND),INTENT(IN)::TOP(OPNUM)
+        REAL(KIND=RKIND),INTENT(OUT)::OP(OPNUM)
+        OP(1)=TOP(1)
+        OP(2)=TOP(2)
+        OP(3)=0.5*(TOP(3)+TOP(7))
+        OP(4)=0.5*(TOP(4)+TOP(8))
+        OP(5)=0.5*(TOP(5)+TOP(9))
+        OP(6)=0.5*(TOP(6)+TOP(10))
+        OP(7)=0.5*(TOP(8)-TOP(4))
+        OP(8)=0.5*(TOP(7)-TOP(3))
+        OP(9)=0.5*(TOP(10)-TOP(6))
+        OP(10)=0.5*(TOP(9)-TOP(5))
+END SUBROUTINE ANTITRANS_PARA
+
+!-------SELF-CONSISTENT EQUATIONS--------------!
+! ALGORITHM:
+    ! GIVEN TEMPERATURE T:
+                    ! BI-SECTION---> |EQ.(1) |
+                                   ! |EQ.(2) |
+                                   ! |EQ.(3) |
+           ! INPUT: INITIAL TOP_0--->|:      |---->TOP_1
+                                   ! |EQ.(9) |
+                                   ! |EQ.(10)|
+           ! ....  ERRO
+           ! ....------>TOP_N                        
+
+SUBROUTINE SOLVE_EQUATIONS(TEMP,INITOP,FINTOP,ITERNUM)
+        USE CONST
+        USE MODEL 
+        IMPLICIT NONE 
+        REAL(KIND=RKIND),INTENT(IN) ::TEMP
+        REAL(KIND=RKIND),INTENT(IN) :: INITOP(OPNUM)
+        REAL(KIND=RKIND),INTENT(OUT) :: FINTOP(OPNUM)
+        REAL(KIND=RKIND)::MEDTOP(OPNUM),LEFT,RIGHT,SOLUTION
+        REAL(KIND=RKIND)::CHI_0,MAS(2),PAS(2),MSS(2),PSS(2),AVAL
+        INTEGER(KIND=IKIND)::J1, ITERNUM
+        MEDTOP=INITOP
+        DO J1=1,ITERNUM
+            PRINT*,"J1=",J1
+                LEFT=MEDTOP(1)
+                RIGHT=MEDTOP(1)+0.5
+                PRINT*,"LEFT=",LEFT
+            CALL BI_SECTION_SOLVE(MEDTOP,LEFT,RIGHT,ERRO,TEMP,SOLUTION) 
+            
+            CALL CONSIST_EQ2(MEDTOP,CHI_0,TEMP) 
+            PRINT*,"CHI_0=",CHI_0
+            CALL CONSIST_EQ34(MEDTOP,MAS,TEMP) 
+            CALL CONSIST_EQ56(MEDTOP,PAS,TEMP) 
+            CALL CONSIST_EQ78(MEDTOP,MSS,TEMP) 
+            CALL CONSIST_EQ910(MEDTOP,PSS,TEMP) 
+            FINTOP(1)=SOLUTION 
+            FINTOP(2)=CHI_0 
+            FINTOP(3)=MAS(1) 
+            FINTOP(4)=MAS(2) 
+            FINTOP(5)=PAS(1) 
+            FINTOP(6)=PAS(2) 
+            FINTOP(7)=MSS(1)
+            FINTOP(8)=MSS(2)
+            FINTOP(9)=PSS(1)
+            FINTOP(10)=PSS(2)
+            CALL AVAL_FINTOP(FINTOP,AVAL)
+            IF(AVAL<ERRO) EXIT
+            MEDTOP=LAMBDA*(MEDTOP+FINTOP)
+        END DO 
+END SUBROUTINE
+
+SUBROUTINE AVAL_FINTOP(FINTOP,AVAL)
+        USE CONST
+        USE MODEL 
+        IMPLICIT NONE
+        REAL(KIND=RKIND),INTENT(IN)::FINTOP(OPNUM)
+        REAL(KIND=RKIND),INTENT(OUT)::AVAL
+        INTEGER::I1
+        AVAL=0.0D0
+        DO I1=1,OPNUM
+            AVAL=AVAL+FINTOP(I1)**2
+        ENDDO
+        AVAL=SQRT(AVAL/10)
+        PRINT*,"AVAL=",AVAL
+END SUBROUTINE 
+
+SUBROUTINE BI_SECTION_SOLVE(INTOP,LEFT,RIGHT,TOLERANCE,TEMP,SOLUTION)
+        USE CONST
+        USE MODEL 
+        IMPLICIT NONE 
+        REAL(KIND=RKIND),INTENT(IN)::INTOP(OPNUM),LEFT, RIGHT, TOLERANCE,TEMP
+        REAL(KIND=RKIND),INTENT(OUT)::SOLUTION
+        REAL(KIND=RKIND)::A,FA,B,FB,C,FC
+        INTEGER(KIND=IKIND)::J2
+
+        A=LEFT
+        PRINT*,"A=",A
+        B=RIGHT
+        PRINT*,"B=",B
+!The physics of the consist_eq1_funct is the difference between spinons' density apd 2S 
+        CALL CONSIST_EQ1_FUNCT(INTOP,A,TEMP,FA)
+        PRINT*,"FA=",FA
+        CALL CONSIST_EQ1_FUNCT(INTOP,B,TEMP,FB)
+        PRINT*,"FB=",FB
+        IF(FA*FB>0) THEN 
+            PRINT*,"ERRO: FA*FB MUST BE NEGATIVE"
+            STOP
+        ELSE IF(FA*FB<0) THEN
+            PRINT*,"J2=",J2
+            IF (ABS(FA)<TOLERANCE) THEN 
+                SOLUTION=A
+            ELSE IF (ABS(FB)<TOLERANCE) THEN 
+                SOLUTION=B
+            ELSE 
+                DO 
+                    C=(A+B)/2.0
+                    CALL CONSIST_EQ1_FUNCT(INTOP,C,TEMP,FC)
+                    PRINT*,"FC=",FC
+                    IF(ABS(FC)<TOLERANCE) THEN 
+                        SOLUTION=C
+                        EXIT
+                    ELSE IF(FA*FC<0) THEN 
+                        B=C
+                        FB=FC
+                    ELSE IF(FB*FC<0) THEN 
+                        A=C
+                        FA=FC
+                    ENDIF
+                ENDDO
+            ENDIF
+        ENDIF 
+        PRINT*,"Solution=",SOLUTION
+END SUBROUTINE 
+
+SUBROUTINE CONSIST_EQ1_FUNCT(TOP,CHEM,TEMP,FUNCT)
+        USE CONST
+        USE MODEL
+        IMPLICIT NONE 
+        REAL(KIND=RKIND),INTENT(IN)::TOP(OPNUM),CHEM,TEMP
+        REAL(KIND=RKIND),INTENT(OUT)::FUNCT
+        REAL(KIND=RKIND)::K1,K2,INTOP(OPNUM)
+        INTEGER(KIND=IKIND)::J1,J2,SPIN
+        !REAL(KIND=RKIND),EXTERNAL::H0,H,BEC_DIS,ENERGY
+        FUNCT=0.0D0
+        INTOP=TOP
+        INTOP(1)=CHEM
+        !print*,"ERRO"
+        DO J1=1,LX
+            DO J2=1,LY
+                K1=KGENERATOR_X(J1,J2)
+                K2=KGENERATOR_Y(J1,J2)
+                DO SPIN=-1, 1, 2
+                   FUNCT=FUNCT+(1.0/(2*LX*LY))*(H0(K1,K2,INTOP,SPIN)/H(K1,K2,INTOP,SPIN))*&
+                    &(BEC_DIS(ENERGY(K1,K2,INTOP,SPIN,ALPHA),TEMP)+BEC_DIS(ENERGY(K1,K2,INTOP,ALPHA*SPIN,BETA),TEMP)+1)
+                ENDDO
+            ENDDO
+        ENDDO
+        
+        FUNCT=FUNCT-2*S-1
+END SUBROUTINE
+
+FUNCTION KGENERATOR_X(J1,J2)
+        USE CONST 
+        USE MODEL 
+        IMPLICIT NONE 
+        REAL(KIND=RKIND):: KGENERATOR_X 
+        INTEGER::J1,J2
+        KGENERATOR_X=(2*PI/LX)*(J1-1)-PI
+           
+END FUNCTION 
+
+FUNCTION KGENERATOR_Y(J1,J2)
+        USE CONST
+        USE MODEL 
+        IMPLICIT NONE 
+        REAL(KIND=RKIND)::KGENERATOR_Y
+        INTEGER::J1,J2
+        KGENERATOR_Y=(2*PI/LX)*(J1-1)*(-SQRT(3.0)/3.0)+(2*PI/LY)*(J2-1)*(2.0*SQRT(3.0)/3.0)-PI*SQRT(3.0)/3.0
+
+END FUNCTION 
+
+SUBROUTINE CONSIST_EQ910(INTOP,PSS,TEMP)
+        USE CONST
+        USE MODEL 
+        IMPLICIT NONE 
+        REAL(KIND=RKIND),INTENT(IN)::INTOP(OPNUM),TEMP
+        REAL(KIND=RKIND),INTENT(OUT)::PSS(2)
+        INTEGER::J1,J2,SPIN
+        REAL(KIND=RKIND)::K1,K2
+        !REAL(KIND=RKIND),EXTERNAL::BEC_DIS,G1,H0,H,ENERGY
+        PSS=0.0D0
+        DO J1=1, LX
+            DO J2=1, LY
+                K1=KGENERATOR_X(J1,J2)
+                K2=KGENERATOR_Y(J1,J2)
+                DO SPIN=-1, 1, 2
+                   PSS((SPIN+3)/2)=PSS((SPIN+3)/2)+(1.0/(Z1*LX*LY))*GK1(K1,K2)*(H0(K1,K2,INTOP,SPIN)/H(K1,K2,INTOP,SPIN))*&
+                    &(BEC_DIS(ENERGY(K1,K2,INTOP,SPIN,ALPHA),TEMP)+BEC_DIS(ENERGY(K1,K2,INTOP,ALPHA*SPIN,BETA),TEMP)+1)
+ 
+                ENDDO
+            ENDDO
+        ENDDO
+END SUBROUTINE  
+
+SUBROUTINE CONSIST_EQ78(INTOP,MSS,TEMP)
+        USE CONST
+        USE MODEL
+        IMPLICIT NONE 
+        REAL(KIND=RKIND),INTENT(IN)::INTOP(OPNUM),TEMP
+        REAL(KIND=RKIND),INTENT(OUT)::MSS(2)
+        INTEGER::J1,J2,SPIN
+        REAL(KIND=RKIND)::K1,K2
+        !REAL(KIND=RKIND),EXTERNAL::BEC_DIS,G1,ENERGY
+        MSS=0.0D0
+        DO J1=1,LX
+            DO J2=1, LY 
+                K1=KGENERATOR_X(J1,J2)
+                K2=KGENERATOR_Y(J1,J2)
+                DO SPIN=-1,1,2
+                    MSS((SPIN+3)/2)=MSS((SPIN+3)/2)+(1.0/(Z1*LX*LY))*GK1(K1,K2)*&
+                    &(BEC_DIS(ENERGY(K1,K2,INTOP,SPIN,ALPHA),TEMP)-BEC_DIS(ENERGY(K1,K2,INTOP,ALPHA*SPIN,BETA),TEMP)-1)
+                ENDDO
+            ENDDO
+        ENDDO
+
+END SUBROUTINE 
+
+SUBROUTINE CONSIST_EQ56(INTOP,PAS,TEMP)
+        USE CONST
+        USE MODEL
+        IMPLICIT NONE 
+        REAL(KIND=RKIND),INTENT(IN)::INTOP(OPNUM),TEMP
+        REAL(KIND=RKIND),INTENT(OUT)::PAS(2)
+        INTEGER::J1,J2,SPIN
+        REAL(KIND=RKIND)::K1,K2
+        !REAL(KIND=RKIND),EXTERNAL::G,BEC_DIS,ENERGY
+        PAS=0.0D0
+        DO J1=1, LX
+            DO J2=1, LY
+                K1=KGENERATOR_X(J1,J2)
+                K2=KGENERATOR_Y(J1,J2)
+                DO SPIN=-1,1,2 
+                    PAS((SPIN+3)/2)=PAS((SPIN+3)/2)+(1.0/(Z1*LX*LY))*GK(K1,K2)*(H0(K1,K2,INTOP,SPIN)/H(K1,K2,INTOP,SPIN))*&
+                    &(BEC_DIS(ENERGY(K1,K2,INTOP,SPIN,ALPHA),TEMP)+BEC_DIS(ENERGY(K1,K2,INTOP,ALPHA*SPIN,BETA),TEMP)+1)
+
+                ENDDO
+            ENDDO
+        ENDDO
+END SUBROUTINE 
+
+
+SUBROUTINE CONSIST_EQ34(INTOP,MAS,TEMP)
+        USE CONST
+        USE MODEL 
+        IMPLICIT NONE 
+        REAL(KIND=RKIND),INTENT(IN)::INTOP(OPNUM),TEMP
+        REAL(KIND=RKIND),INTENT(OUT)::MAS(2)
+        INTEGER::J1,J2,SPIN
+        REAL(KIND=RKIND)::K1,K2
+        !REAL(KIND=RKIND),EXTERNAL::G,BEC_DIS,ENERGY
+        MAS=0.0D0
+        DO J1=1,LX
+            DO J2=1,LY
+            K1=KGENERATOR_X(J1,J2)
+            K2=KGENERATOR_Y(J1,J2)
+                DO SPIN=-1,1,2
+                    MAS((SPIN+3)/2)=MAS((SPIN+3)/2)+(1.0/(Z1*LX*LY))*GK(K1,K2)*&
+                    &(BEC_DIS(ENERGY(K1,K2,INTOP,SPIN,ALPHA),TEMP)-BEC_DIS(ENERGY(K1,K2,INTOP,ALPHA*SPIN,BETA),TEMP)-1)
+                ENDDO
+            ENDDO
+        ENDDO
+END SUBROUTINE 
+
+SUBROUTINE CONSIST_EQ2(INTOP,CHI_0,TEMP)
+        USE CONST
+        USE MODEL
+        IMPLICIT NONE 
+        REAL(KIND=RKIND),INTENT(IN)::INTOP(OPNUM),TEMP
+        REAL(KIND=RKIND),INTENT(OUT)::CHI_0
+        INTEGER::J1,J2,SPIN
+        REAL(KIND=RKIND)::K1,K2
+        !REAL(KIND=RKIND),EXTERNAL::H1,H,H3,BEC_DIS,ENERGY
+        !COMPLEX(KIND=RKIND),EXTERNAL::SF
+        CHI_0=0.0D0
+        DO J1=1, LX
+            DO J2=1,LY
+                K1=KGENERATOR_X(J1,J2)
+                K2=KGENERATOR_Y(J1,J2)
+                DO SPIN=-1,1,2
+                    CHI_0=CHI_0-(1.0/(4.0*LX*LY))*SPIN*(((H1(K1,K2,INTOP(2),SPIN)/H(K1,K2,INTOP,SPIN))&
+                        &*REAL(SF(K1,K2))-(H2(K1,K2,INTOP(2),SPIN)/H(K1,K2,INTOP,SPIN))*AIMAG(SF(K1,K2)))*&
+                        &(BEC_DIS(ENERGY(K1,K2,INTOP,SPIN,ALPHA),TEMP)+BEC_DIS(ENERGY(K1,K2,INTOP,ALPHA*SPIN,BETA),TEMP)+1))
+                ENDDO
+           ENDDO
+        ENDDO
+    
+END SUBROUTINE 
+
+!---------BOSON EINSTEIN DISTRIBUTION--------------------!
+FUNCTION BEC_DIS(ENERGY,TEMP)
+        USE CONST
+        USE MODEL
+        IMPLICIT NONE
+        REAL(KIND=RKIND),INTENT(IN) :: ENERGY, TEMP
+        REAL(KIND=RKIND):: BEC_DIS
+        BEC_DIS=1.0D0/(EXP(ENERGY/TEMP)-1.0D0)
+END FUNCTION BEC_DIS
+
+!SPIN-->+1 OR -1
+!DEG--->+1 OR -1
+!---------SPINON ENERGY ---------------------------------!
+FUNCTION ENERGY(K1,K2,TOP,SPIN,DEG)
+        USE CONST 
+        USE MODEL 
+        IMPLICIT NONE 
+        REAL(KIND=RKIND) :: K1, K2, ENERGY 
+        REAL(KIND=RKIND) :: TOP(OPNUM),SQET
+        INTEGER::SPIN, DEG
+        !DEG==1: \ALPHA MODE 
+        !DEG==-1: \BETA MODE
+        IF(DEG==1) THEN 
+            ENERGY=H(K1,K2,TOP,SPIN)+H3(K1,K2,TOP,SPIN)
+        ELSE 
+            ENERGY=H(K1,K2,TOP,-1*SPIN)-H3(K1,K2,TOP,-1*SPIN)
+            !ENERGY=SQRT(H0(K1,K2,TOP,-1*SPIN)**2-(J*ABS(SF(K1,K2))*TOP(2)*Z0)**2)-H3(K1,K2,TOP,-1*SPIN)
+        END IF
+        SQET=H0(K1,K2,TOP,SPIN)**2-H1(K1,K2,TOP(2),SPIN)**2-H2(K1,K2,TOP(2),SPIN)**2
+        PRINT*,"H0^2=",H0(K1,K2,TOP,SPIN)**2
+        PRINT*,"CHI_0=",TOP(2)
+        PRINT*,"H1^2=",H1(K1,K2,TOP(2),SPIN)**2
+        PRINT*,"H2^2=",H2(K1,K2,TOP(2),SPIN)**2
+        IF(SQET<0) THEN 
+            PRINT*, "HELLO"
+            STOP
+        END IF 
+END FUNCTION ENERGY 
+
+FUNCTION H(K1,K2,TOP,SPIN)
+        USE CONST
+        USE MODEL 
+        IMPLICIT NONE 
+        REAL(KIND=RKIND)::K1,K2,H
+        INTEGER::SPIN
+        REAL(KIND=RKIND)::TOP(OPNUM)
+        H=SQRT(H0(K1,K2,TOP,SPIN)**2-H1(K1,K2,TOP(2),SPIN)**2-H2(K1,K2,TOP(2),SPIN)**2)
+        
+END FUNCTION H
+
+FUNCTION H0(K1,K2,TOP,SPIN)
+        USE CONST
+        USE MODEL 
+        IMPLICIT NONE 
+        REAL(KIND=RKIND) :: K1, K2, H0
+        REAL(KIND=RKIND) :: TOP(OPNUM)
+        INTEGER::SPIN
+        REAL(KIND=RKIND)::MSM, MAM
+        !REAL(KIND=RKIND), EXTERNAL:: GK, GK1 
+        IF(SPIN==1) THEN 
+            MSM=TOP(4)
+            MAM=TOP(6)
+        ELSE
+            MSM=TOP(3)
+            MAM=TOP(5)
+        END IF 
+        
+        H0 = TOP(1)+0.25*DM*SPIN*(-MSM*GK(K1,K2)+MAM*GK1(K1,K2))-SPIN*0.5*H_STAGG
+
+END FUNCTION H0 
+
+FUNCTION H1(K1,K2,CHI_0,SPIN)
+        USE CONST
+        USE MODEL 
+        IMPLICIT NONE 
+        REAL(KIND=RKIND)::K1,K2,CHI_0,H1
+        INTEGER::SPIN
+        !COMPLEX(KIND=RKIND),EXTERNAL::SF
+        H1=REAL(-1.0*J*CHI_0*SPIN*Z0*SF(K1,K2))
+        
+END FUNCTION H1
+
+FUNCTION H2(K1,K2,CHI_0,SPIN)
+        USE CONST
+        USE MODEL 
+        IMPLICIT NONE 
+        REAL(KIND=RKIND)::K1,K2,CHI_0,H2
+        INTEGER::SPIN
+        !COMPLEX(KIND=RKIND),EXTERNAL::SF
+        H2=AIMAG(-1.0*J*CHI_0*SPIN*Z0*SF(K1,K2))
+        
+END FUNCTION H2
+
+
+FUNCTION H3(K1,K2,TOP,SPIN)
+        USE CONST 
+        USE MODEL
+        IMPLICIT NONE 
+        REAL(KIND=RKIND) :: K1, K2, H3
+        REAL(KIND=RKIND) :: TOP(OPNUM)
+        INTEGER :: SPIN 
+        REAL(KIND=RKIND) :: PSM, PAM
+        !REAL(KIND=RKIND), EXTERNAL :: GK, GK1
+        IF(SPIN==1) THEN
+            PSM=TOP(8)
+            PAM=TOP(10)
+        ELSE 
+            PSM=TOP(7)
+            PAM=TOP(9)
+        END IF 
+ 
+        H3 = 0.25*DM*SPIN*(-PSM*GK(K1,K2)+PAM*GK1(K1,K2))
+
+END FUNCTION 
+
+FUNCTION GK(K1,K2)
+        USE CONST
+        USE MODEL
+        IMPLICIT NONE 
+        REAL(KIND=RKIND) :: K1, K2, GK
+        GK =-2*(SIN(K1)+SIN(-0.5*K1+0.5*SQRT(3.0)*K2)+SIN(-0.5*K1-0.5*SQRT(3.0)*K2))
+END FUNCTION GK
+
+FUNCTION GK1(K1,K2)
+        USE CONST
+        USE MODEL 
+        IMPLICIT NONE 
+        REAL(KIND=RKIND) :: K1, K2, GK1
+        GK1 =-2*(COS(K1)+COS(-0.5*K1+0.5*SQRT(3.0)*K2)+COS(-0.5*K1-0.5*SQRT(3.0)*K2))
+        
+END FUNCTION GK1
+
+FUNCTION SF(K1,K2)
+        USE CONST
+        USE MODEL
+        IMPLICIT NONE 
+        REAL(KIND=RKIND) :: K1, K2
+        COMPLEX(KIND=RKIND) :: SF
+        !SF = (1.0D0/Z0)*(EXP(I*(0.5*K1-0.5*K2/SQRT(3.0))) + EXP(I*(K2/SQRT(3.0)))+ EXP(I*(-0.5*K1-0.5*K2/SQRT(3.0))))
+        SF=1.0
+END FUNCTION SF
+
+END MODULE SOLVE_CONSIST_EQUATIONS
+! END OF SOLVING THE SELF-CONSISTENT EQUATIONS
+! MODULE THERMAL_HALL
+    ! CONTAINS
+
+! END MODULE THERMAL_HALL
+
+!--------------- Task -------------------------
+MODULE TASK
+
+CONTAINS
+
+SUBROUTINE SOLVE()
+    USE CONST
+    USE MODEL
+    USE SOLVE_CONSIST_EQUATIONS
+    IMPLICIT NONE 
+    REAL(KIND=RKIND)::INITIAL_INPUT(OPNUM),TOP(OPNUM),FINTOP(OPNUM)
+    REAL(KIND=RKIND)::OUTOP(OPNUM),TEMP
+    TEMP=0.1
+    INITIAL_INPUT(1)=Z0*J*S+0.5*H_STAGG+0.001
+    INITIAL_INPUT(2)=1.0D0*S
+    INITIAL_INPUT(3)=2.0D0*S
+    INITIAL_INPUT(4)=3.0D0*S
+    INITIAL_INPUT(5)=0.0D0
+    INITIAL_INPUT(6)=0.0D0
+    INITIAL_INPUT(7)=INITIAL_INPUT(4)
+    INITIAL_INPUT(8)=2.0D0*S
+    INITIAL_INPUT(9)=0.0D0
+    INITIAL_INPUT(10)=0.0D0
+    CALL TRANSFORM_PARA(INITIAL_INPUT,TOP)
+    CALL SOLVE_EQUATIONS(TEMP,TOP,FINTOP,100000)
+    CALL ANTITRANS_PARA(FINTOP,OUTOP)    
+    CALL PRINTOUTOP(TEMP,OUTOP)
+
+END SUBROUTINE SOLVE
+
+SUBROUTINE PRINTOUTOP(TEMP,OUTOP)
+    USE CONST
+    USE MODEL
+    IMPLICIT NONE 
+    REAL(KIND=RKIND)::TEMP
+    REAL(KIND=RKIND)::OUTOP(OPNUM)
+    INTEGER::J1
+    PRINT*,"------------TEMPERATURE------------"
+    PRINT*,"TEMP=",TEMP
+    PRINT*,"------------ORDER PARAMETERS--------"
+    DO J1=1,OPNUM
+        PRINT*,OUTOP(J1)
+    ENDDO
+END SUBROUTINE
+
+END MODULE TASK
+!----------------INTIAL INPUT ----------------
+
+!----------------TESTS ------------------------
+! MODULE TEST
+! CONTAINS 
+
+! SUBROUTINE TEST_NAN(J,X)
+    ! USE CONST
+    ! USE MODEL
+    ! IMPLICIT NONE 
+    ! INTEGER(KIND=IKIND)::J
+    ! REAL(KIND=RKIND)::X
+    ! IF(J==5) THEN 
+        ! PRINT*,"X=",X
+    ! END IF 
+! END TEST_NAN
+
+! END MODULE TEST
+
+
+PROGRAM MAIN
+    USE TASK 
+    IMPLICIT NONE
+        PRINT*,"------ SPINONS' THERMAL HALL -------"
+        CALL SOLVE()
+        PRINT*,"------ TEST   ---------------------"
+END PROGRAM MAIN
